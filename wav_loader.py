@@ -15,7 +15,7 @@ def _load_wav( file_name, frame_dur, sr=16000 ):
     pcm_data, _ = rosa.load( file_name, sr )
     win_len = int( frame_dur*sr/1000 )
 
-    return torch.tensor(pcm_data)
+    return torch.tensor(pcm_data[:sr])
 
 class WavDataset(Dataset):
     def __init__(self, noisy_paths, clean_paths, frame_dur=37.5):

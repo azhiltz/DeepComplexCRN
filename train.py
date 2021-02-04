@@ -46,24 +46,91 @@ def train(dns_home, mask_type="E", log_path="logs/", batch_size = 128, test_rati
     test_loader = DataLoader( test_dataset, batch_size=batch_size, shuffle=True )
     
     #construct the model
-    model = DCCRN(rnn_units=128,masking_mode=mask_type,use_clstm=True, kernel_size=5, kernel_num=[32, 64, 128, 256])
+    model = DCCRN(rnn_units=128,masking_mode=mask_type,use_clstm=True, kernel_size=5, kernel_num=[32, 64, 128, 256, 256, 256])
     model.to(torch.device("cuda:0"))
 
-    optimizer = torch.optim.SGD(model.parameters(), args.lr )
 
+    optimizer = torch.optim.SGD(model.parameters(), args.lr, momentum=args.momentum,
+                                weight_decay=args.weight_decay )
+
+    # optionally resume from a checkpoint
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print("=> loading checkpoint '{}'".format(args.resume))
+            if args.gpu is None:
+                checkpoint = torch.load(args.resume)
+            else:
+                # Map model to be loaded to specified single gpu.
+                loc = 'cuda:{}'.format(args.gpu)
+                checkpoint = torch.load(args.resume, map_location=loc)
+            args.start_epoch = checkpoint['epoch']
+            
+            model.load_state_dict(checkpoint['state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            print("=> loaded checkpoint '{}' (epoch {})"
+                  .format(args.resume, checkpoint['epoch']))
+        else:
+            print("=> no checkpoint found at '{}'".format(args.resume))
     #train 
-    for epoch in range(0, epochs):
+    for epoch in range(args.start_epoch, epochs):
         adjust_learning_rate( optimizer, epoch, args )
 
         train_epoch( train_loader, model, model.loss, optimizer, args )
         
-        save_checkpoint( 
+        val_loss = validate( test_loader, model, model.loss, args )
+
+        model_path = os.path.join(args.log_path, 'checkpoints_' + str(epoch) + '.ckpt' )
+        torch.save(
                     {
                     'epoch':epoch+1,
                     'state_dict':model.state_dict(),
-                    'optimizer':optimizer.state.state_dict() 
-                    }, True )
+                    'optimizer':optimizer.state_dict() 
+                    }, model_path )
 
+def validate(val_loader, model, criterion, args):
+    batch_time = AverageMeter('Time', ':6.3f')
+    losses = AverageMeter('Loss', ':.4e')
+    progress = ProgressMeter(
+        len(val_loader),
+        [batch_time, losses],
+        prefix='Test: ')
+
+    sr = 16000
+    # switch to evaluate mode
+    model.eval()
+    loss_all= 0
+    batch_num = 0
+    with torch.no_grad():
+        end = time.time()
+        for i, ( x, y ) in enumerate(val_loader):
+            
+            batch_num += 1
+            x = x.cuda(0, non_blocking=True)
+            #print(x.shape)
+            y = y.cuda(0, non_blocking=True)
+
+            frame_num = int(x.shape[1] / 16000)
+            loss_sum = 0
+            for j in range( 0, frame_num ):
+                xx = x[:, j*sr:(j+1)*sr]
+                yy = y[:, j*sr:(j+1)*sr]
+                output = model(xx)[1]
+                loss = model.loss(output, yy, loss_mode='SI-SNR')
+                loss_sum += loss.detach().item()
+            
+            losses.update( loss_sum, x.size(0))
+            batch_time.update(time.time()-end)
+            end = time.time()
+
+            if i % args.print_freq == 0:
+                progress.display(i)
+            loss_all += loss_sum
+
+        # TODO: this should also be done with the ProgressMeter
+        print(' average loss: %.5f'
+              .format( loss_all / batch_num ) )
+
+    return loss_all / batch_num
 
 def train_epoch( train_loader, model, criterion, optimizer, args ):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -74,20 +141,32 @@ def train_epoch( train_loader, model, criterion, optimizer, args ):
         [batch_time, data_time, losses]
     )
 
+    sr = 16000
+    # switch to evaluate mode
+    model.train()
+
     end = time.time()
     for i, ( x, y ) in enumerate(train_loader):
         data_time.update(time.time()-end)
 
         x = x.cuda(0, non_blocking=True)
+        #print(x.shape)
         y = y.cuda(0, non_blocking=True)
 
-        output = model(x)[1]
-        loss = model.loss(outputs, y, loss_mode='SI-SNR')
-        losses.update( loss.item(), x.size(0))
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        frame_num = int(x.shape[1] / 16000)
+        loss_sum = 0
+        for j in range( 0, frame_num ):
+            xx = x[:, j*sr:(j+1)*sr]
+            yy = y[:, j*sr:(j+1)*sr]
+            output = model(xx)[1]
+            loss = model.loss(output, yy, loss_mode='SI-SNR')
+            loss_sum += loss.detach().item()
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        
+        losses.update( loss_sum, x.size(0))
         batch_time.update(time.time()-end)
         end = time.time()
 
